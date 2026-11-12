@@ -1,6 +1,10 @@
 # Job Desk Tim (versi Netlify, gratis)
 
-public/ = tampilan. netlify/functions/api.mjs = backend (jalan di Netlify, tidak terlihat pengunjung).
+public/ = file statis (style.css, app.js). netlify/functions/page.mjs = halaman utama yang DIRENDER DI SERVER (SSR).
+netlify/lib/render.mjs = penyusun HTML. netlify/functions/api.mjs = backend data/login (jalan di Netlify, tidak terlihat pengunjung).
+
+Alur: browser buka `/` -> Netlify Function membaca data dari Blobs -> menyusun HTML -> browser menerima halaman jadi.
+JS (app.js) hanya untuk interaksi; setelah data berubah, JS meminta potongan HTML baru dari server (`/?frag=1`).
 Data disimpan di Netlify Blobs. Password dev TIDAK ada di kode; disimpan di Environment variables Netlify.
 
 ## Cara pasang

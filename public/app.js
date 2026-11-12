@@ -1,17 +1,16 @@
+// Halaman sudah disusun SERVER (lihat netlify/functions/page.mjs).
+// File ini hanya menangani interaksi: klik tab, ubah status, tambah/edit/hapus, login.
+// Setelah data berubah, JS meminta potongan HTML baru dari server (?frag=1) lalu menempelkannya.
 (function () {
   'use strict';
   var $ = function (s) { return document.querySelector(s); };
-  var ST = ['belum', 'proses', 'selesai'];
-  var LBL = { belum: 'Belum', proses: 'Proses', selesai: 'Selesai' };
-  var S = { cats: [], tasks: [], active: null, dev: false, edit: null, draft: { name: '', task: '' } };
+  var dlg = $('#loginDlg');
+  var editing = false;
 
-  // ---------- helper ----------
-  function h(tag, cls, text) {
-    var e = document.createElement(tag);
-    if (cls) e.className = cls;
-    if (text != null) e.textContent = text; // selalu textContent -> aman dari XSS
-    return e;
-  }
+  function app() { return $('#app'); }
+  function active() { return app().dataset.active || ''; }
+  function isDev() { return app().dataset.dev === '1'; }
+
   var toastTimer;
   function toast(msg) {
     var t = $('#toast');
@@ -19,6 +18,19 @@
     clearTimeout(toastTimer);
     toastTimer = setTimeout(function () { t.hidden = true; }, 3200);
   }
+
+  // ---------- ambil HTML baru dari server ----------
+  function refresh(k) {
+    var key = k || active();
+    return fetch('/?frag=1&k=' + encodeURIComponent(key), { credentials: 'same-origin', headers: { 'X-Requested-With': 'fetch' } })
+      .then(function (r) { if (!r.ok) throw new Error('Gagal memuat data'); return r.text(); })
+      .then(function (html) {
+        editing = false;
+        app().outerHTML = html;
+      })
+      .catch(function (e) { toast(e.message || 'Gagal memuat data. Coba muat ulang halaman.'); });
+  }
+
   function api(method, url, body) {
     return fetch(url, {
       method: method,
@@ -28,170 +40,123 @@
     }).then(function (r) {
       return r.json().catch(function () { return {}; }).then(function (d) {
         if (!r.ok) {
-          if (r.status === 401 && S.dev && url !== '/api/login') { S.dev = false; S.edit = null; render(); }
+          if (r.status === 401 && url !== '/api/login') refresh();
           throw new Error(d.error || 'Terjadi kesalahan');
         }
         return d;
       });
     });
   }
-  function act(p) {
-    return p.then(load).catch(function (e) { toast(e.message); });
+  function act(p, k) {
+    return p.then(function () { return refresh(k); }).catch(function (e) { toast(e.message); });
   }
 
-  // ---------- data ----------
-  function load() {
-    return api('GET', '/api/data').then(function (d) {
-      S.cats = d.categories || []; S.tasks = d.tasks || [];
-      if (!S.cats.some(function (c) { return c.id === S.active; })) S.active = S.cats[0] ? S.cats[0].id : null;
-      render();
-    }).catch(function () { $('#empty').hidden = false; $('#empty').textContent = 'Gagal memuat data. Coba muat ulang halaman.'; });
-  }
+  // ---------- klik (delegasi) ----------
+  document.addEventListener('click', function (e) {
+    var t = e.target;
+    var menu = $('#userMenu');
+    if (menu && !menu.contains(t) && !t.closest('#userBtn')) menu.hidden = true;
 
-  // ---------- render ----------
-  function render() {
-    renderHeader(); renderTabs(); renderTools(); renderList();
-  }
-  function renderHeader() {
-    $('#modeBadge').hidden = !S.dev;
-    $('#userBtn').classList.toggle('on', S.dev);
-    $('#userBtn').setAttribute('aria-label', S.dev ? 'Menu akun dev' : 'Masuk mode dev');
-    $('#addForm').hidden = !S.dev;
-    $('#catTools').hidden = !S.dev;
-    if (!S.dev) $('#userMenu').hidden = true;
-  }
-  function renderTabs() {
-    var nav = $('#tabs'); nav.textContent = '';
-    S.cats.forEach(function (c) {
-      var n = S.tasks.filter(function (t) { return t.cat === c.id && t.status !== 'selesai'; }).length;
-      var b = h('button', 'tab', c.name);
-      b.type = 'button';
-      if (c.id === S.active) b.setAttribute('aria-current', 'true');
-      if (n) b.appendChild(h('span', 'n', String(n)));
-      b.onclick = function () { S.active = c.id; S.edit = null; render(); };
-      nav.appendChild(b);
-    });
-    if (S.dev) {
-      var p = h('button', 'tab plus', '+');
-      p.type = 'button'; p.setAttribute('aria-label', 'Tambah kategori');
-      p.onclick = function () {
-        var name = prompt('Nama kategori baru:');
-        if (name && name.trim()) act(api('POST', '/api/categories', { name: name.trim() }).then(function (c) { S.active = c.id; }));
-      };
-      nav.appendChild(p);
+    var tab = t.closest('a.tab[data-k]');
+    if (tab) {
+      e.preventDefault();
+      history.replaceState(null, '', '/?k=' + tab.dataset.k);
+      refresh(tab.dataset.k);
+      return;
     }
-  }
-  function renderTools() {
-    var cat = S.cats.filter(function (c) { return c.id === S.active; })[0];
-    $('#renameCat').onclick = function () {
-      if (!cat) return;
-      var name = prompt('Nama baru untuk kategori ini:', cat.name);
-      if (name && name.trim()) act(api('PATCH', '/api/categories/' + cat.id, { name: name.trim() }));
-    };
-    $('#deleteCat').onclick = function () {
-      if (!cat) return;
-      if (confirm('Hapus kategori "' + cat.name + '" beserta semua tugas di dalamnya?')) act(api('DELETE', '/api/categories/' + cat.id));
-    };
-  }
-  function renderList() {
-    var ul = $('#list'); ul.textContent = '';
-    var items = S.tasks.filter(function (t) { return t.cat === S.active; });
-    var c = { belum: 0, proses: 0, selesai: 0 };
-    items.forEach(function (t) { c[t.status]++; });
-    $('#summary').textContent = items.length ? 'Belum ' + c.belum + ' · Proses ' + c.proses + ' · Selesai ' + c.selesai : '';
-    var empty = $('#empty');
-    empty.hidden = !!items.length;
-    if (!items.length) empty.textContent = S.dev ? 'Belum ada tugas di kategori ini. Tambahkan lewat form di atas.' : 'Belum ada tugas di kategori ini.';
-    items.forEach(function (t) { ul.appendChild(row(t)); });
-  }
-  function row(t) {
-    var li = h('li', 'item st-' + t.status);
-    var info = h('div');
-    if (S.edit === t.id) {
-      info.className = 'edit-fields';
-      var a = h('input'); a.type = 'text'; a.maxLength = 60; a.value = S.draft.name; a.setAttribute('aria-label', 'Nama');
-      a.oninput = function () { S.draft.name = a.value; };
-      var b = h('input'); b.type = 'text'; b.maxLength = 300; b.value = S.draft.task; b.setAttribute('aria-label', 'Tugas');
-      b.oninput = function () { S.draft.task = b.value; };
-      info.appendChild(a); info.appendChild(b);
-    } else {
-      info.appendChild(h('div', 'who', t.name));
-      info.appendChild(h('div', 'what', t.task));
+    if (t.closest('#userBtn')) {
+      e.stopPropagation();
+      if (!isDev()) { $('#loginErr').hidden = true; $('#pw').value = ''; dlg.showModal(); $('#pw').focus(); }
+      else if (menu) menu.hidden = !menu.hidden;
+      return;
     }
-    li.appendChild(info);
-
-    var grp = h('div', 'status'); grp.setAttribute('role', 'group'); grp.setAttribute('aria-label', 'Status ' + t.name);
-    ST.forEach(function (s) {
-      var lb = h('label', 'chip s-' + s);
-      var cb = h('input'); cb.type = 'checkbox'; cb.checked = t.status === s; cb.disabled = !S.dev;
-      cb.onchange = function () {
-        if (!S.dev) { cb.checked = t.status === s; return; }
-        if (t.status === s) { cb.checked = true; return; }
-        act(api('PATCH', '/api/tasks/' + t.id, { status: s }));
-      };
-      lb.appendChild(cb); lb.appendChild(h('span')).appendChild(h('b', null, LBL[s]));
-      grp.appendChild(lb);
-    });
-    li.appendChild(grp);
-
-    if (S.dev) {
-      var ac = h('div', 'acts');
-      if (S.edit === t.id) {
-        var ok = h('button', 'primary', 'Simpan'); ok.type = 'button';
-        ok.onclick = function () {
-          var n = S.draft.name.trim(), k = S.draft.task.trim();
-          if (!n || !k) { toast('Nama dan tugas tidak boleh kosong'); return; }
-          S.edit = null; act(api('PATCH', '/api/tasks/' + t.id, { name: n, task: k }));
-        };
-        var no = h('button', null, 'Batal'); no.type = 'button';
-        no.onclick = function () { S.edit = null; render(); };
-        ac.appendChild(ok); ac.appendChild(no);
-      } else {
-        var ed = h('button', null, 'Edit'); ed.type = 'button';
-        ed.onclick = function () { S.edit = t.id; S.draft = { name: t.name, task: t.task }; render(); };
-        var del = h('button', 'danger', 'Hapus'); del.type = 'button';
-        del.onclick = function () { if (confirm('Hapus tugas ini?')) act(api('DELETE', '/api/tasks/' + t.id)); };
-        ac.appendChild(ed); ac.appendChild(del);
+    if (t.closest('#logoutBtn')) {
+      api('POST', '/api/logout', {}).catch(function () {}).then(function () { return refresh(); }).then(function () { toast('Keluar dari mode dev'); });
+      return;
+    }
+    var b = t.closest('button[data-act]');
+    if (!b) return;
+    var a = b.dataset.act;
+    if (a === 'addcat') {
+      var name = prompt('Nama kategori baru:');
+      if (name && name.trim()) api('POST', '/api/categories', { name: name.trim() }).then(function (c) {
+        history.replaceState(null, '', '/?k=' + c.id); return refresh(c.id);
+      }).catch(function (er) { toast(er.message); });
+    } else if (a === 'rename') {
+      var nn = prompt('Nama baru untuk kategori ini:', app().dataset.catname);
+      if (nn && nn.trim()) act(api('PATCH', '/api/categories/' + active(), { name: nn.trim() }));
+    } else if (a === 'delcat') {
+      if (confirm('Hapus kategori "' + app().dataset.catname + '" beserta semua tugas di dalamnya?')) {
+        api('DELETE', '/api/categories/' + active()).then(function () {
+          history.replaceState(null, '', '/'); return refresh('');
+        }).catch(function (er) { toast(er.message); });
       }
-      li.appendChild(ac);
+    } else {
+      var li = b.closest('li.item');
+      if (!li) return;
+      var id = li.dataset.id;
+      if (a === 'del') { if (confirm('Hapus tugas ini?')) act(api('DELETE', '/api/tasks/' + id)); }
+      else if (a === 'edit') startEdit(li);
+      else if (a === 'cancel') refresh();
+      else if (a === 'save') {
+        var n = li.querySelector('input[data-f=name]').value.trim(), k = li.querySelector('input[data-f=task]').value.trim();
+        if (!n || !k) { toast('Nama dan tugas tidak boleh kosong'); return; }
+        act(api('PATCH', '/api/tasks/' + id, { name: n, task: k }));
+      }
     }
-    return li;
+  });
+
+  function startEdit(li) {
+    editing = true;
+    var who = li.querySelector('.who').textContent, what = li.querySelector('.what').textContent;
+    var info = li.querySelector('.info'); info.textContent = ''; info.className = 'info edit-fields';
+    var a = document.createElement('input'); a.type = 'text'; a.maxLength = 60; a.value = who; a.dataset.f = 'name'; a.setAttribute('aria-label', 'Nama');
+    var b = document.createElement('input'); b.type = 'text'; b.maxLength = 300; b.value = what; b.dataset.f = 'task'; b.setAttribute('aria-label', 'Tugas');
+    info.appendChild(a); info.appendChild(b);
+    var ac = li.querySelector('.acts'); ac.textContent = '';
+    var ok = document.createElement('button'); ok.type = 'button'; ok.className = 'primary'; ok.dataset.act = 'save'; ok.textContent = 'Simpan';
+    var no = document.createElement('button'); no.type = 'button'; no.dataset.act = 'cancel'; no.textContent = 'Batal';
+    ac.appendChild(ok); ac.appendChild(no);
+    a.focus();
   }
+
+  // ---------- ubah status ----------
+  document.addEventListener('change', function (e) {
+    var cb = e.target;
+    if (!cb.matches || !cb.matches('input[data-status]')) return;
+    if (!isDev()) return;
+    if (!cb.checked) { cb.checked = true; return; }
+    act(api('PATCH', '/api/tasks/' + cb.dataset.id, { status: cb.dataset.status }));
+  });
 
   // ---------- form tambah ----------
-  $('#addForm').onsubmit = function (e) {
+  document.addEventListener('submit', function (e) {
+    if (e.target.id !== 'addForm') return;
     e.preventDefault();
     var n = $('#inName'), k = $('#inTask');
     var nv = n.value.trim(), kv = k.value.trim();
-    if (!S.dev || !nv || !kv || !S.active) return;
-    act(api('POST', '/api/tasks', { cat: S.active, name: nv, task: kv }).then(function () { n.value = ''; k.value = ''; n.focus(); }));
-  };
-
-  // ---------- login / menu akun ----------
-  var dlg = $('#loginDlg');
-  $('#userBtn').onclick = function (e) {
-    e.stopPropagation();
-    if (!S.dev) { $('#loginErr').hidden = true; $('#pw').value = ''; dlg.showModal(); $('#pw').focus(); }
-    else $('#userMenu').hidden = !$('#userMenu').hidden;
-  };
-  document.addEventListener('click', function (e) {
-    if (!$('#userMenu').contains(e.target)) $('#userMenu').hidden = true;
+    if (!isDev() || !nv || !kv || !active()) return;
+    act(api('POST', '/api/tasks', { cat: active(), name: nv, task: kv }).then(function () { n.value = ''; k.value = ''; }))
+      .then(function () { var i = $('#inName'); if (i) i.focus(); });
   });
+
+  // ---------- login ----------
   $('#loginCancel').onclick = function () { dlg.close(); };
   $('#loginForm').onsubmit = function (e) {
     e.preventDefault();
     var btn = e.target.querySelector('.primary'); btn.disabled = true;
     api('POST', '/api/login', { password: $('#pw').value }).then(function () {
-      S.dev = true; $('#pw').value = ''; dlg.close(); render(); toast('Mode dev aktif');
+      $('#pw').value = ''; dlg.close();
+      return refresh().then(function () { toast('Mode dev aktif'); });
     }).catch(function (err) {
       var el = $('#loginErr'); el.textContent = err.message; el.hidden = false; $('#pw').select();
     }).then(function () { btn.disabled = false; });
   };
-  $('#logoutBtn').onclick = function () {
-    api('POST', '/api/logout', {}).catch(function () {}).then(function () { S.dev = false; S.edit = null; render(); toast('Keluar dari mode dev'); });
-  };
 
-  // ---------- mulai ----------
-  api('GET', '/api/me').then(function (d) { S.dev = !!d.dev; }).catch(function () {}).then(load);
-  setInterval(function () { if (!S.edit && !document.hidden && !dlg.open) load(); }, 60000);
+  // ---------- segarkan otomatis tiap 60 detik ----------
+  setInterval(function () {
+    var f = document.activeElement;
+    var typing = f && f.tagName === 'INPUT' && f.type === 'text' && app().contains(f);
+    if (!editing && !typing && !document.hidden && !dlg.open) refresh();
+  }, 60000);
 })();
